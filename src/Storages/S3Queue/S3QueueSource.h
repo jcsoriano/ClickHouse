@@ -52,16 +52,28 @@ public:
         size_t estimatedKeysCount() override;
 
     private:
+        using Bucket = S3QueueFilesMetadata::Bucket;
+        using Processor = S3QueueFilesMetadata::Processor;
+
         const std::shared_ptr<S3QueueFilesMetadata> metadata;
         const std::unique_ptr<GlobIterator> glob_iterator;
         std::atomic<bool> & shutdown_called;
         std::mutex mutex;
         Poco::Logger * log;
 
-        const bool sharded_processing;
-        const size_t current_shard;
-        std::unordered_map<size_t, std::deque<KeyWithInfoPtr>> sharded_keys;
-        std::mutex sharded_keys_mutex;
+        const bool split_files_into_buckets;
+        const Processor current_processor;
+        std::optional<size_t> current_bucket;
+        std::mutex buckets_mutex;
+        struct ListedKeys
+        {
+            std::deque<KeyWithInfoPtr> keys;
+            std::optional<Processor> processor;
+        };
+        std::unordered_map<Bucket, ListedKeys> listed_keys_cache;
+        bool iterator_finished = false;
+
+        KeyWithInfoPtr getNextKeyWithBucket();
     };
 
     StorageS3QueueSource(

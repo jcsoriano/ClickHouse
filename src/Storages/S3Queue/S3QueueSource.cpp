@@ -59,68 +59,102 @@ StorageS3QueueSource::FileIterator::FileIterator(
     }
 }
 
+StorageS3QueueSource::KeyWithInfoPtr StorageS3QueueSource::FileIterator::getNextKeyWithBucket()
+{
+    /// We need this lock to maintain consistency between listing s3 directory
+    /// and getting/putting result into listed_keys_cache.
+    std::lock_guard lock(buckets_mutex);
+
+    while (true)
+    {
+        /// Each processing thread gets next path from glob_iterator->next()
+        /// and checks if corresponding bucket is already acquired by someone.
+        /// In case it is already acquired, they put the key into listed_keys_cache,
+        /// so that the thread who acquired the bucket will be able to see
+        /// those keys without the need to list s3 directory once again.
+        if (current_bucket.has_value())
+        {
+            auto it = listed_keys_cache.find(current_bucket.value);
+            if (it != listed_keys_cache)
+            {
+                auto & [processor, bucket_keys] = it->second;
+
+                /// Check correctness just in case.
+                if (current_processor != processor)
+                {
+                    throw Exception(
+                        ErrorCodes::LOGICAL_ERROR,
+                        "Expected current processor {} to be equal to bucket {} processor, but have {}",
+                        current_processor, current_bucket, processor);
+                }
+
+                auto key_with_info = bucket_keys.back();
+                bucket_keys.pop_back();
+                return key_with_info;
+            }
+        }
+        /// If processing thread has already acquired some bucket
+        /// and while listing s3 directory gets a key which is in a different bucket,
+        /// it also puts the key into listed_keys_cache to allow others to process it,
+        /// because one processing thread can acquire only one bucket at a time.
+        else
+        {
+            for (auto & [bucket, bucket_info] : listed_keys_cache)
+            {
+                auto & [processor, bucket_keys] = bucket_info;
+                if (processor.has_value() || bucket_keys.empty())
+                    continue;
+
+                if (!metadata->acquireBucket(bucket))
+                    continue;
+
+                current_bucket = bucket;
+                processor = current_processor;
+                auto key_with_info = bucket_keys.back();
+                bucket_keys.pop_back();
+                return key_with_info;
+            }
+        }
+
+        if (iterator_finished)
+            return {};
+
+        auto key_with_info = glob_iterator->next();
+        if (key_with_info)
+        {
+            const auto bucket = metadata->getBucketForPath(key_with_info->key);
+            if (current_bucket.has_value())
+            {
+                if (current_bucket.value() != bucket)
+                {
+                    listed_keys_cache[bucket].push_back(key_with_info->key);
+                    continue;
+                }
+            }
+            else
+            {
+                if (!metadata->acquireBucket(bucket))
+                    continue;
+
+                current_bucket = bucket;
+            }
+        }
+        else
+        {
+            if (listed_keys_cache.empty())
+                return {};
+
+            iterator_finished = true;
+            continue;
+        }
+    }
+}
+
 StorageS3QueueSource::KeyWithInfoPtr StorageS3QueueSource::FileIterator::next(size_t idx)
 {
     while (!shutdown_called)
     {
-        KeyWithInfoPtr val{nullptr};
-
-        {
-            std::unique_lock lk(sharded_keys_mutex, std::defer_lock);
-            if (sharded_processing)
-            {
-                /// To make sure order on keys in each shard in sharded_keys
-                /// we need to check sharded_keys and to next() under lock.
-                lk.lock();
-
-                if (auto it = sharded_keys.find(idx); it != sharded_keys.end())
-                {
-                    auto & keys = it->second;
-                    if (!keys.empty())
-                    {
-                        val = keys.front();
-                        keys.pop_front();
-                        chassert(idx == metadata->getProcessingIdForPath(val->key));
-                    }
-                }
-                else
-                {
-                    throw Exception(ErrorCodes::LOGICAL_ERROR,
-                                    "Processing id {} does not exist (Expected ids: {})",
-                                    idx, fmt::join(metadata->getProcessingIdsForShard(current_shard), ", "));
-                }
-            }
-
-            if (!val)
-            {
-                val = glob_iterator->next();
-                if (val && sharded_processing)
-                {
-                    const auto processing_id_for_key = metadata->getProcessingIdForPath(val->key);
-                    if (idx != processing_id_for_key)
-                    {
-                        if (metadata->isProcessingIdBelongsToShard(processing_id_for_key, current_shard))
-                        {
-                            LOG_TEST(log, "Putting key {} into queue of processor {} (total: {})",
-                                     val->key, processing_id_for_key, sharded_keys.size());
-
-                            if (auto it = sharded_keys.find(processing_id_for_key); it != sharded_keys.end())
-                            {
-                                it->second.push_back(val);
-                            }
-                            else
-                            {
-                                throw Exception(ErrorCodes::LOGICAL_ERROR,
-                                                "Processing id {} does not exist (Expected ids: {})",
-                                                processing_id_for_key, fmt::join(metadata->getProcessingIdsForShard(current_shard), ", "));
-                            }
-                        }
-                        continue;
-                    }
-                }
-            }
-        }
-
+        auto val = split_files_into_buckets ? getNextKeyWithBucket() : glob_iterator->next();
         if (!val)
             return {};
 

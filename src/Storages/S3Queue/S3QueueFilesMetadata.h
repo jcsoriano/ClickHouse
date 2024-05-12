@@ -111,7 +111,10 @@ public:
 
     /// Calculate which processing id corresponds to a given file path.
     /// The file will be processed by a thread related to this processing id.
-    size_t getProcessingIdForPath(const std::string & path) const;
+    using Bucket = size_t;
+    Bucket getBucketForPath(const std::string & path) const;
+
+    using Processor = std::string;
 
 private:
     const S3QueueMode mode;
@@ -121,7 +124,6 @@ private:
     const size_t min_cleanup_interval_ms;
     const size_t max_cleanup_interval_ms;
     const size_t shards_num;
-    const size_t threads_per_shard;
 
     const fs::path zookeeper_processing_path;
     const fs::path zookeeper_processed_path;

@@ -132,7 +132,6 @@ S3QueueFilesMetadata::S3QueueFilesMetadata(const fs::path & zookeeper_path_, con
     , min_cleanup_interval_ms(settings_.s3queue_cleanup_interval_min_ms.value)
     , max_cleanup_interval_ms(settings_.s3queue_cleanup_interval_max_ms.value)
     , shards_num(settings_.s3queue_total_shards_num)
-    , threads_per_shard(settings_.s3queue_processing_threads_num)
     , zookeeper_processing_path(zookeeper_path_ / "processing")
     , zookeeper_processed_path(zookeeper_path_ / "processed")
     , zookeeper_failed_path(zookeeper_path_ / "failed")
@@ -297,7 +296,7 @@ void S3QueueFilesMetadata::unregisterShard(size_t shard_id)
 
 size_t S3QueueFilesMetadata::getProcessingIdsNum() const
 {
-    return shards_num * threads_per_shard;
+    return shards_num;
 }
 
 std::vector<size_t> S3QueueFilesMetadata::getProcessingIdsForShard(size_t shard_id) const
