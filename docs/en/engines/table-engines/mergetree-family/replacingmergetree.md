@@ -161,3 +161,7 @@ All of the parameters excepting `ver` have the same meaning as in `MergeTree`.
 - `ver` - column with the version. Optional parameter. For a description, see the text above.
 
 </details>
+
+## Skip Indexes
+
+Note that skip indexes do not work when used with `FROM FINAL`, so avoid adding skip indexes when creating tables with `ReplacingMergeTree` engines as you would only add CPU/IO overhead on insert.
